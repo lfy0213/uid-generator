@@ -44,6 +44,9 @@ public class BitsAllocator {
      */
     private final long maxDeltaSeconds;
     private final long maxWorkerId;
+    /**
+     * seqBit=13的情况下，这个值为8191
+     */
     private final long maxSequence;
 
     /**

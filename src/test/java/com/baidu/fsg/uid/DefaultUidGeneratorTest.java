@@ -20,13 +20,13 @@ import com.baidu.fsg.uid.impl.DefaultUidGenerator;
 
 /**
  * Test for {@link DefaultUidGenerator}
- * 
+ *
  * @author yutianbao
  */
 @RunWith(SpringJUnit4ClassRunner.class)
-@ContextConfiguration(locations = { "classpath:uid/default-uid-spring.xml" })
+@ContextConfiguration(locations = {"classpath:uid/default-uid-spring.xml"})
 public class DefaultUidGeneratorTest {
-    private static final int SIZE = 100000; // 10w
+    private static final int SIZE = 1000000; // 10w
     private static final boolean VERBOSE = true;
     private static final int THREADS = Runtime.getRuntime().availableProcessors() << 1;
 
@@ -38,6 +38,7 @@ public class DefaultUidGeneratorTest {
      */
     @Test
     public void testSerialGenerate() {
+        long start = System.currentTimeMillis();
         // Generate UID serially
         Set<Long> uidSet = new HashSet<>(SIZE);
         for (int i = 0; i < SIZE; i++) {
@@ -46,15 +47,18 @@ public class DefaultUidGeneratorTest {
 
         // Check UIDs are all unique
         checkUniqueID(uidSet);
+        long stop = System.currentTimeMillis();
+        System.out.println((stop - start) / 1000);
     }
 
     /**
      * Test for parallel generate
-     * 
+     *
      * @throws InterruptedException
      */
     @Test
     public void testParallelGenerate() throws InterruptedException {
+        long start = System.currentTimeMillis();
         AtomicInteger control = new AtomicInteger(-1);
         Set<Long> uidSet = new ConcurrentSkipListSet<>();
 
@@ -78,13 +82,15 @@ public class DefaultUidGeneratorTest {
 
         // Check UIDs are all unique
         checkUniqueID(uidSet);
+        long stop = System.currentTimeMillis();
+        System.out.println((stop - start) / 1000);
     }
 
     /**
      * Worker run
      */
     private void workerRun(Set<Long> uidSet, AtomicInteger control) {
-        for (;;) {
+        for (; ; ) {
             int myPosition = control.updateAndGet(old -> (old == SIZE ? SIZE : old + 1));
             if (myPosition == SIZE) {
                 return;

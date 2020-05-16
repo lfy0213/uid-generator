@@ -62,23 +62,48 @@ public class DefaultUidGenerator implements UidGenerator, InitializingBean {
     private static final Logger LOGGER = LoggerFactory.getLogger(DefaultUidGenerator.class);
 
     /** Bits allocate */
+    /**
+     * 时间差值，当前时间戳减去2016-09-20所在的时间戳，转成秒数
+     * 2^28 = 268435456
+     * 268435456 / (3600 * 24 * 365 ) = 8年
+     * 默认值8年内可以保证id不重复
+     */
     protected int timeBits = 28;
+    /**
+     * workId，2^22 = 4194304
+     * 也就是说机器最多重启4194304次
+     */
     protected int workerBits = 22;
+    /**
+     * 2^13 = 8196，每秒能产生的最大id数，如果超过了，就提前占用下一秒的id
+     */
     protected int seqBits = 13;
 
-    /** Customer epoch, unit as second. For example 2016-05-20 (ms: 1463673600000)*/
+    /**
+     * Customer epoch, unit as second. For example 2016-05-20 (ms: 1463673600000)
+     * 时间基准
+     **/
     protected String epochStr = "2016-05-20";
     protected long epochSeconds = TimeUnit.MILLISECONDS.toSeconds(1463673600000L);
 
     /** Stable fields after spring bean initializing */
     protected BitsAllocator bitsAllocator;
+    /**
+     * 当前机器的workId，每次重启id会自增
+     */
     protected long workerId;
 
     /** Volatile fields caused by nextId() */
+    /**
+     * 只在nextId()方法中使用，利用synchronized同步方法，来保证这两个字段的原子性和可见性
+     */
     protected long sequence = 0L;
     protected long lastSecond = -1L;
 
     /** Spring property */
+    /**
+     * workId生成器，默认是通过mysql自增主键的方式来保证id唯一且递增
+     */
     protected WorkerIdAssigner workerIdAssigner;
 
     @Override
@@ -87,6 +112,7 @@ public class DefaultUidGenerator implements UidGenerator, InitializingBean {
         bitsAllocator = new BitsAllocator(timeBits, workerBits, seqBits);
 
         // initialize worker id
+        // 初始化workId，具体的操作就是往数据库插一条数据，利用数据库主键自增，获取一个唯一的workId
         workerId = workerIdAssigner.assignWorkerId();
         if (workerId > bitsAllocator.getMaxWorkerId()) {
             throw new RuntimeException("Worker id " + workerId + " exceeds the max " + bitsAllocator.getMaxWorkerId());
@@ -128,34 +154,41 @@ public class DefaultUidGenerator implements UidGenerator, InitializingBean {
 
     /**
      * Get UID
-     *
+     * 同步获取，线程安全，效率不够高
      * @return UID
      * @throws UidGenerateException in the case: Clock moved backwards; Exceeds the max timestamp
      */
     protected synchronized long nextId() {
+        // 当前秒数
         long currentSecond = getCurrentSecond();
 
         // Clock moved backwards, refuse to generate uid
+        // 时钟回拨检测，如果当前的时间小于上一次的生成id的时间，那么报错
+        // 这里的话，假设时间回拨了10s，那这10秒都不可用，会一致报错，直到时间追上
         if (currentSecond < lastSecond) {
             long refusedSeconds = lastSecond - currentSecond;
             throw new UidGenerateException("Clock moved backwards. Refusing for %d seconds", refusedSeconds);
         }
 
         // At the same second, increase sequence
+        // 同一秒的话，直接自增sequence
         if (currentSecond == lastSecond) {
             sequence = (sequence + 1) & bitsAllocator.getMaxSequence();
             // Exceed the max sequence, we wait the next second to generate uid
+            // 超过了sequence的限制，默认是2^13 = 8196，那么就从下一秒钟获取，currentSecond=nextSecond
             if (sequence == 0) {
                 currentSecond = getNextSecond(lastSecond);
             }
 
         // At the different second, sequence restart from zero
+        // 跳到了下一秒，sequence从0开始自增
         } else {
             sequence = 0L;
         }
-
+        // 更新最后一次获取的时间
         lastSecond = currentSecond;
 
+        // 根据时间差，workerId，sequence计算uid
         // Allocate bits for UID
         return bitsAllocator.allocate(currentSecond - epochSeconds, workerId, sequence);
     }

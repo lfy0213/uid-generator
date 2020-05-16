@@ -49,6 +49,9 @@ public class RingBuffer {
     private final int bufferSize;
     private final long indexMask;
     private final long[] slots;
+    /**
+     * 标志数组，数组大小与slots一致，记录是否可以添加到slots中，防止多线程添加id时带来的重复添加问题
+     */
     private final PaddedAtomicLong[] flags;
 
     /** Tail: last position sequence to produce */
@@ -57,14 +60,28 @@ public class RingBuffer {
     /** Cursor: current position sequence to consume */
     private final AtomicLong cursor = new PaddedAtomicLong(START_POINT);
 
-    /** Threshold for trigger padding buffer*/
+    /**
+     * Threshold for trigger padding buffer
+     * 填充因子，少于这个阈值的时候，会预填充ringBuffer
+     * 默认是50%
+     **/
     private final int paddingThreshold; 
     
-    /** Reject put/take buffer handle policy */
+    /**
+     * Reject put/take buffer handle policy
+     * 拒绝策略
+     * 默认的策略
+     *      put操作：直接丢弃，打一条日志
+     *      take操作：报个错
+     * */
     private RejectedPutBufferHandler rejectedPutHandler = this::discardPutBuffer;
     private RejectedTakeBufferHandler rejectedTakeHandler = this::exceptionRejectedTakeBuffer; 
     
-    /** Executor of padding buffer */
+    /**
+     * Executor of padding buffer
+     * id填充线程池
+     *
+     **/
     private BufferPaddingExecutor bufferPaddingExecutor;
 
     /**
@@ -107,20 +124,28 @@ public class RingBuffer {
      *
      * @param uid
      * @return false means that the buffer is full, apply {@link RejectedPutBufferHandler}
+     *
+     * 方法采用了synchronized，填充ringBuffer是线程安全的
      */
     public synchronized boolean put(long uid) {
         long currentTail = tail.get();
         long currentCursor = cursor.get();
 
         // tail catches the cursor, means that you can't put any cause of RingBuffer is full
+        // 计算剩余的slot的数量
         long distance = currentTail - (currentCursor == START_POINT ? 0 : currentCursor);
+        // 如果已满
         if (distance == bufferSize - 1) {
             rejectedPutHandler.rejectPutBuffer(this, uid);
             return false;
         }
 
         // 1. pre-check whether the flag is CAN_PUT_FLAG
+        // 计算在ringBuffer中的索引，其实就是对数组大小取余，不过这里的数组大小都是2的整数倍，所以可以 & (arr.length -1)，速度更快
         int nextTailIndex = calSlotIndex(currentTail + 1);
+        // 检查标志位，其实我觉得不需要这一步也行，因为既然方法都加synchronized了，那么都是串形填充slot了，别的线程不可能超过自己
+        // 前面都判断了未满，那么这里肯定就不可能是CAN_TAKE_FLAG了，只可能是CAN_PUT_FLAG
+        // 所以我觉得这一步可以省略。。。
         if (flags[nextTailIndex].get() != CAN_PUT_FLAG) {
             rejectedPutHandler.rejectPutBuffer(this, uid);
             return false;
@@ -129,12 +154,16 @@ public class RingBuffer {
         // 2. put UID in the next slot
         // 3. update next slot' flag to CAN_TAKE_FLAG
         // 4. publish tail with sequence increase by one
+        // 填充slot，同时设置对应的标志位为CAN_TAKE_FLAG，tail索引自增
+        // 因为这个方法是synchronized，所以这对三个值的更新是满足一致性的
+        // 同时也保证了刚刚放入的slot无法立即被消费，直到tail.incrementAndGet()被执行
         slots[nextTailIndex] = uid;
         flags[nextTailIndex].set(CAN_TAKE_FLAG);
         tail.incrementAndGet();
 
         // The atomicity of operations above, guarantees by 'synchronized'. In another word,
         // the take operation can't consume the UID we just put, until the tail is published(tail.incrementAndGet())
+        //
         return true;
     }
 
@@ -151,6 +180,7 @@ public class RingBuffer {
     public long take() {
         // spin get next available cursor
         long currentCursor = cursor.get();
+        // 获取下一个游标，如果当前游标==tail，那么返回当前游标
         long nextCursor = cursor.updateAndGet(old -> old == tail.get() ? old : old + 1);
 
         // check for safety consideration, it never occurs
@@ -158,6 +188,7 @@ public class RingBuffer {
 
         // trigger padding in an async-mode if reach the threshold
         long currentTail = tail.get();
+        // 判断剩下的slot数量是否小于阈值来决定是否需要预生成填充id
         if (currentTail - nextCursor < paddingThreshold) {
             LOGGER.info("Reach the padding threshold:{}. tail:{}, cursor:{}, rest:{}", paddingThreshold, currentTail,
                     nextCursor, currentTail - nextCursor);
@@ -165,21 +196,26 @@ public class RingBuffer {
         }
 
         // cursor catch the tail, means that there is no more available UID to take
+        // 如果当前游标==tail，那么采用拒绝策略
+        // 默认的拒绝策略是报错0.0,我们可以在业务中采用自定义的策略，做一些其他的操作
         if (nextCursor == currentCursor) {
             rejectedTakeHandler.rejectTakeBuffer(this);
         }
 
         // 1. check next slot flag is CAN_TAKE_FLAG
+        // 检查对应的标志符是否是可取
         int nextCursorIndex = calSlotIndex(nextCursor);
         Assert.isTrue(flags[nextCursorIndex].get() == CAN_TAKE_FLAG, "Curosr not in can take status");
 
         // 2. get UID from next slot
         // 3. set next slot flag as CAN_PUT_FLAG.
+        // 设置标志位为CAN_PUT_FLAG，即表示可填充了，代表已经被取走了
         long uid = slots[nextCursorIndex];
         flags[nextCursorIndex].set(CAN_PUT_FLAG);
 
         // Note that: Step 2,3 can not swap. If we set flag before get value of slot, the producer may overwrite the
         // slot with a new UID, and this may cause the consumer take the UID twice after walk a round the ring
+        // 第二步和第三步不能交换，如果我们先设置标志符，生产者（填充线程）可能就直接填了，那么拿到的id是刚刚添加的新id，那么在未来的某个时间，这个id会被再消费一次，也就意味着id被消费了两次
         return uid;
     }
 

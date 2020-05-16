@@ -52,9 +52,22 @@ public class CachedUidGenerator extends DefaultUidGenerator implements Disposabl
     private static final Logger LOGGER = LoggerFactory.getLogger(CachedUidGenerator.class);
     private static final int DEFAULT_BOOST_POWER = 3;
 
-    /** Spring properties */
+    /**
+     * Spring properties
+     * 膨胀系数shift，默认是3，也就是2^3 = 8
+     * ringBuffer默认缓存"膨胀系数"秒钟的全部id，如果按默认值来算，那么ringbuffer只会缓冲2^13 * 8 = 65536个
+     * 增大因子，意味着缓冲的id会变多，吞吐量也会变大
+     * */
     private int boostPower = DEFAULT_BOOST_POWER;
+    /**
+     * 填充因子，默认50%
+     * 在高并发情况下，可以增大该值，来增加吞吐量
+     */
     private int paddingFactor = RingBuffer.DEFAULT_PADDING_PERCENT;
+    /**
+     * id填充线程执行频率，单位为秒
+     * 如果值为0，表示不使用Schedule线程异步填充
+     */
     private Long scheduleInterval;
     
     private RejectedPutBufferHandler rejectedPutBufferHandler;
@@ -62,6 +75,9 @@ public class CachedUidGenerator extends DefaultUidGenerator implements Disposabl
 
     /** RingBuffer */
     private RingBuffer ringBuffer;
+    /**
+     * 线程池，其中包含id生成线程池和id填充线程池
+     */
     private BufferPaddingExecutor bufferPaddingExecutor;
 
     @Override
@@ -96,17 +112,20 @@ public class CachedUidGenerator extends DefaultUidGenerator implements Disposabl
 
     /**
      * Get the UIDs in the same specified second under the max sequence
-     * 
+     * 获取一秒钟内的所有id
      * @param currentSecond
      * @return UID list, size of {@link BitsAllocator#getMaxSequence()} + 1
      */
     protected List<Long> nextIdsForOneSecond(long currentSecond) {
         // Initialize result list size of (max sequence + 1)
+        //  8191 + 1 = 8192
         int listSize = (int) bitsAllocator.getMaxSequence() + 1;
         List<Long> uidList = new ArrayList<>(listSize);
 
         // Allocate the first sequence of the second, the others can be calculated with the offset
+        // 计算第一个id
         long firstSeqUid = bitsAllocator.allocate(currentSecond - epochSeconds, workerId, 0L);
+        // 后续id采用自增计算
         for (int offset = 0; offset < listSize; offset++) {
             uidList.add(firstSeqUid + offset);
         }
@@ -116,14 +135,19 @@ public class CachedUidGenerator extends DefaultUidGenerator implements Disposabl
     
     /**
      * Initialize RingBuffer & RingBufferPaddingExecutor
+     * 初始化ringBuffer
      */
     private void initRingBuffer() {
         // initialize RingBuffer
+        // 8191+1 * 2^3 = 65536
+        // seq序号位 左移 膨胀系数
         int bufferSize = ((int) bitsAllocator.getMaxSequence() + 1) << boostPower;
         this.ringBuffer = new RingBuffer(bufferSize, paddingFactor);
         LOGGER.info("Initialized ring buffer size:{}, paddingFactor:{}", bufferSize, paddingFactor);
 
         // initialize RingBufferPaddingExecutor
+        // 初始化ringBuffer异步填充线程
+        // 执行周期为0，表示不启用
         boolean usingSchedule = (scheduleInterval != null);
         this.bufferPaddingExecutor = new BufferPaddingExecutor(ringBuffer, this::nextIdsForOneSecond, usingSchedule);
         if (usingSchedule) {
@@ -134,6 +158,7 @@ public class CachedUidGenerator extends DefaultUidGenerator implements Disposabl
         
         // set rejected put/take handle policy
         this.ringBuffer.setBufferPaddingExecutor(bufferPaddingExecutor);
+        // 设置拒绝策略
         if (rejectedPutBufferHandler != null) {
             this.ringBuffer.setRejectedPutHandler(rejectedPutBufferHandler);
         }
@@ -142,6 +167,7 @@ public class CachedUidGenerator extends DefaultUidGenerator implements Disposabl
         }
         
         // fill in all slots of the RingBuffer
+        // 预填充ringBuffer中的所有slot
         bufferPaddingExecutor.paddingBuffer();
         
         // start buffer padding threads
